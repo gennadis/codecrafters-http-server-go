@@ -13,6 +13,18 @@ const (
 	listenAddr = "0.0.0.0:4221"
 )
 
+type RequestLine struct {
+	Method   string
+	Path     string
+	Protocol string
+}
+
+type HTTPRequest struct {
+	ReqLine RequestLine
+	Headers map[string]string
+	Body    string
+}
+
 func main() {
 	l, err := net.Listen(network, listenAddr)
 	if err != nil {
@@ -20,64 +32,80 @@ func main() {
 	}
 	log.Printf("app started on %s", listenAddr)
 
-	c, err := l.Accept()
-	if err != nil {
-		log.Fatalf("error accepting connection %v", err)
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			log.Fatalf("error accepting connection %v", err)
+		}
+		go handleConnection(c)
 	}
-	handleConnection(c)
 }
 
 func handleConnection(c net.Conn) {
 	defer c.Close()
 
 	reader := bufio.NewReader(c)
-	reqLine, err := reader.ReadString('\n')
+	request, err := parseRequest(reader)
 	if err != nil {
-		log.Printf("error reading request line: %v", err)
-		return
+		log.Printf("failed to parse incoming HTTP request: %v", err)
 	}
-	method, urlPath, protocol, err := parseRequestLine(reqLine)
-	if err != nil {
-		log.Printf("error parsing request line: %v", err)
-		return
-	}
-	log.Printf("HTTP request accepted: method %s, urlPath %s, protocol %s", method, urlPath, protocol)
+	log.Printf("HTTP request accepted: method %s, urlPath %s", request.ReqLine.Method, request.ReqLine.Path)
 
-	headers, err := readHeaders(reader)
-	if err != nil {
-		log.Printf("error parsing request headers: %v", err)
-		return
+	var resp string
+
+	switch path := request.ReqLine.Path; {
+	case path == "/":
+		resp = "HTTP/1.1 200 OK\r\n\r\n"
+
+	case strings.HasPrefix(path, "/echo/"):
+		echoStr := strings.TrimPrefix(path, "/echo/")
+		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(echoStr), echoStr)
+
+	case path == "/user-agent":
+		userAgent := request.Headers["User-Agent"]
+		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
+
+	default:
+		resp = "HTTP/1.1 404 Not Found\r\n\r\n"
 	}
 
-	if urlPath == "/" {
-		sendResponse(c, "HTTP/1.1 200 OK\r\n\r\n")
-	} else if strings.HasPrefix(urlPath, "/echo") {
-		echoStr := strings.TrimPrefix(urlPath, "/echo/")
-		resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(echoStr), echoStr)
-		sendResponse(c, resp)
-	} else if urlPath == "/user-agent" {
-		userAgent := headers["User-Agent"]
-		resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
-		sendResponse(c, resp)
-	} else {
-		sendResponse(c, "HTTP/1.1 404 Not Found\r\n\r\n")
-	}
-}
-
-func sendResponse(c net.Conn, response string) {
-	if _, err := c.Write([]byte(response)); err != nil {
+	if _, err := c.Write([]byte(resp)); err != nil {
 		log.Fatalf("error writing response %v", err)
 	}
-	log.Printf("HTTP response sent: %s", response)
+	log.Printf("HTTP response sent: %s", resp)
 }
 
-func parseRequestLine(reqLine string) (string, string, string, error) {
-	// Example request line: "GET /qwerty HTTP/1.1".
-	parts := strings.Fields(reqLine)
-	if len(parts) < 3 {
-		return "", "", "", fmt.Errorf("invalid request line: %s", reqLine)
+func parseRequest(r *bufio.Reader) (*HTTPRequest, error) {
+	var httpReq HTTPRequest
+	rawReqLine, err := r.ReadString('\n')
+	if err != nil {
+		log.Printf("error reading request line: %v", err)
+		return nil, err
 	}
-	return parts[0], parts[1], parts[2], nil
+
+	reqLine, err := readRequestLine(rawReqLine)
+	if err != nil {
+		log.Printf("error parsing request line: %v", err)
+		return nil, err
+	}
+	httpReq.ReqLine = *reqLine
+
+	headers, err := readHeaders(r)
+	if err != nil {
+		log.Printf("error parsing request headers: %v", err)
+		return nil, err
+	}
+	httpReq.Headers = headers
+
+	return &httpReq, nil
+}
+
+func readRequestLine(rawReqLine string) (*RequestLine, error) {
+	parts := strings.Fields(rawReqLine)
+	if len(parts) < 3 {
+		return nil, fmt.Errorf("invalid request line: %s", rawReqLine)
+	}
+	return &RequestLine{Method: parts[0], Path: parts[1], Protocol: parts[2]}, nil
 }
 
 func readHeaders(reader *bufio.Reader) (map[string]string, error) {
