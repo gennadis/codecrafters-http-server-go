@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"log"
 	"net"
+	"strings"
 )
 
 const (
@@ -21,11 +23,40 @@ func main() {
 	if err != nil {
 		log.Fatalf("error accepting connection %v", err)
 	}
-	log.Printf("HTTP request accepted")
+	handleConnection(c)
+}
 
-	okResp := "HTTP/1.1 200 OK\r\n\r\n"
-	if _, err := c.Write([]byte(okResp)); err != nil {
+func handleConnection(c net.Conn) {
+	defer c.Close()
+
+	reader := bufio.NewReader(c)
+	reqLine, err := reader.ReadString('\n')
+	if err != nil {
+		log.Printf("error reading request line: %v", err)
+		return
+	}
+
+	// Example request line: "GET /qwerty HTTP/1.1".
+	parts := strings.Fields(reqLine)
+	if len(parts) < 3 {
+		log.Printf("invalid request line: %s", reqLine)
+		return
+	}
+
+	urlPath := parts[1]
+	log.Printf("HTTP request accepted: method %s, urlPath %s, protocol %s", parts[0], urlPath, parts[2])
+
+	switch urlPath {
+	case "/":
+		sendResponse(c, "HTTP/1.1 200 OK\r\n\r\n")
+	default:
+		sendResponse(c, "HTTP/1.1 404 Not Found\r\n\r\n")
+	}
+}
+
+func sendResponse(c net.Conn, response string) {
+	if _, err := c.Write([]byte(response)); err != nil {
 		log.Fatalf("error writing response %v", err)
 	}
-	log.Printf("HTTP response 200 OK sent")
+	log.Printf("HTTP response sent: %s", response)
 }
