@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -46,10 +47,13 @@ func handleConnection(c net.Conn) {
 	urlPath := parts[1]
 	log.Printf("HTTP request accepted: method %s, urlPath %s, protocol %s", parts[0], urlPath, parts[2])
 
-	switch urlPath {
-	case "/":
+	if urlPath == "/" {
 		sendResponse(c, "HTTP/1.1 200 OK\r\n\r\n")
-	default:
+	} else if strings.HasPrefix(urlPath, "/echo") {
+		echoStr := strings.TrimPrefix(urlPath, "/echo/")
+		resp := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(echoStr), echoStr)
+		sendResponse(c, resp)
+	} else {
 		sendResponse(c, "HTTP/1.1 404 Not Found\r\n\r\n")
 	}
 }
