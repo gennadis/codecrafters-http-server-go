@@ -2,9 +2,11 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -20,95 +22,77 @@ type RequestLine struct {
 }
 
 type HTTPRequest struct {
-	ReqLine RequestLine
-	Headers map[string]string
-	Body    string
+	RequestLine RequestLine
+	Headers     map[string]string
+	Body        string
 }
 
 func main() {
 	l, err := net.Listen(network, listenAddr)
 	if err != nil {
-		log.Fatalf("failed to bind to port")
+		log.Fatalf("failed to bind to port: %v", err)
 	}
 	log.Printf("app started on %s", listenAddr)
 
 	for {
-		c, err := l.Accept()
+		conn, err := l.Accept()
 		if err != nil {
-			log.Fatalf("error accepting connection %v", err)
+			log.Printf("error accepting connection: %v", err)
+			continue
 		}
-		go handleConnection(c)
+		go handleConnection(conn)
 	}
 }
 
-func handleConnection(c net.Conn) {
-	defer c.Close()
+func handleConnection(conn net.Conn) {
+	defer conn.Close()
 
-	reader := bufio.NewReader(c)
-	request, err := parseRequest(reader)
+	reader := bufio.NewReader(conn)
+	request, err := parseHTTPRequest(reader)
 	if err != nil {
 		log.Printf("failed to parse incoming HTTP request: %v", err)
+		return
 	}
-	log.Printf("HTTP request accepted: method %s, urlPath %s", request.ReqLine.Method, request.ReqLine.Path)
+	log.Printf("HTTP request accepted: method %s, path %s", request.RequestLine.Method, request.RequestLine.Path)
 
-	var resp string
-
-	switch path := request.ReqLine.Path; {
-	case path == "/":
-		resp = "HTTP/1.1 200 OK\r\n\r\n"
-
-	case strings.HasPrefix(path, "/echo/"):
-		echoStr := strings.TrimPrefix(path, "/echo/")
-		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(echoStr), echoStr)
-
-	case path == "/user-agent":
-		userAgent := request.Headers["User-Agent"]
-		resp = fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
-
-	default:
-		resp = "HTTP/1.1 404 Not Found\r\n\r\n"
+	response := generateResponse(request)
+	if _, err := conn.Write([]byte(response)); err != nil {
+		log.Printf("error writing response: %v", err)
 	}
-
-	if _, err := c.Write([]byte(resp)); err != nil {
-		log.Fatalf("error writing response %v", err)
-	}
-	log.Printf("HTTP response sent: %s", resp)
+	log.Printf("HTTP response sent: %s", response)
 }
 
-func parseRequest(r *bufio.Reader) (*HTTPRequest, error) {
-	var httpReq HTTPRequest
-	rawReqLine, err := r.ReadString('\n')
+func parseHTTPRequest(reader *bufio.Reader) (*HTTPRequest, error) {
+	rawRequestLine, err := reader.ReadString('\n')
 	if err != nil {
-		log.Printf("error reading request line: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error reading request line: %v", err)
 	}
 
-	reqLine, err := readRequestLine(rawReqLine)
+	requestLine, err := parseRequestLine(rawRequestLine)
 	if err != nil {
-		log.Printf("error parsing request line: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error parsing request line: %v", err)
 	}
-	httpReq.ReqLine = *reqLine
 
-	headers, err := readHeaders(r)
+	headers, err := parseHeaders(reader)
 	if err != nil {
-		log.Printf("error parsing request headers: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("error parsing request headers: %v", err)
 	}
-	httpReq.Headers = headers
 
-	return &httpReq, nil
+	return &HTTPRequest{
+		RequestLine: *requestLine,
+		Headers:     headers,
+	}, nil
 }
 
-func readRequestLine(rawReqLine string) (*RequestLine, error) {
-	parts := strings.Fields(rawReqLine)
+func parseRequestLine(rawRequestLine string) (*RequestLine, error) {
+	parts := strings.Fields(rawRequestLine)
 	if len(parts) < 3 {
-		return nil, fmt.Errorf("invalid request line: %s", rawReqLine)
+		return nil, fmt.Errorf("invalid request line: %s", rawRequestLine)
 	}
 	return &RequestLine{Method: parts[0], Path: parts[1], Protocol: parts[2]}, nil
 }
 
-func readHeaders(reader *bufio.Reader) (map[string]string, error) {
+func parseHeaders(reader *bufio.Reader) (map[string]string, error) {
 	headers := make(map[string]string)
 	for {
 		line, err := reader.ReadString('\n')
@@ -126,4 +110,46 @@ func readHeaders(reader *bufio.Reader) (map[string]string, error) {
 		headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 	return headers, nil
+}
+
+func generateResponse(request *HTTPRequest) string {
+	switch path := request.RequestLine.Path; {
+	case path == "/":
+		return "HTTP/1.1 200 OK\r\n\r\n"
+
+	case strings.HasPrefix(path, "/echo/"):
+		echoStr := strings.TrimPrefix(path, "/echo/")
+		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(echoStr), echoStr)
+
+	case path == "/user-agent":
+		userAgent := request.Headers["User-Agent"]
+		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
+
+	case strings.HasPrefix(path, "/files/"):
+		filename := strings.TrimPrefix(path, "/files/")
+
+		fileContent, err := readFileContent(filename)
+		if errors.Is(err, os.ErrNotExist) {
+			return "HTTP/1.1 404 Not Found\r\n\r\n"
+		} else if err != nil {
+			return "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+		}
+		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
+
+	default:
+		return "HTTP/1.1 404 Not Found\r\n\r\n"
+	}
+}
+
+func readFileContent(filename string) ([]byte, error) {
+	dir := os.Args[2]
+	filePath := dir + filename
+
+	fileContent, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Printf("failed to read file %s: %v", filePath, err)
+		return nil, err
+	}
+
+	return fileContent, nil
 }
