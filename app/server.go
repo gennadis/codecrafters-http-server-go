@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -78,9 +80,15 @@ func parseHTTPRequest(reader *bufio.Reader) (*HTTPRequest, error) {
 		return nil, fmt.Errorf("error parsing request headers: %v", err)
 	}
 
+	body, err := parseBody(reader, headers)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing request body: %v", err)
+	}
+
 	return &HTTPRequest{
 		RequestLine: *requestLine,
 		Headers:     headers,
+		Body:        body,
 	}, nil
 }
 
@@ -112,6 +120,26 @@ func parseHeaders(reader *bufio.Reader) (map[string]string, error) {
 	return headers, nil
 }
 
+func parseBody(reader *bufio.Reader, headers map[string]string) (string, error) {
+	contentLengthStr, ok := headers["Content-Length"]
+	if !ok {
+		return "", nil
+	}
+
+	contentLength, err := strconv.Atoi(contentLengthStr)
+	if err != nil {
+		return "", fmt.Errorf("invalid Content-Length: %v", err)
+	}
+
+	body := make([]byte, contentLength)
+	_, err = io.ReadFull(reader, body)
+	if err != nil {
+		return "", fmt.Errorf("error reading body: %v", err)
+	}
+
+	return string(body), nil
+}
+
 func generateResponse(request *HTTPRequest) string {
 	switch path := request.RequestLine.Path; {
 	case path == "/":
@@ -126,15 +154,30 @@ func generateResponse(request *HTTPRequest) string {
 		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\n\r\n%s", len(userAgent), userAgent)
 
 	case strings.HasPrefix(path, "/files/"):
-		filename := strings.TrimPrefix(path, "/files/")
+		switch request.RequestLine.Method {
+		case "GET":
+			filename := strings.TrimPrefix(path, "/files/")
 
-		fileContent, err := readFileContent(filename)
-		if errors.Is(err, os.ErrNotExist) {
-			return "HTTP/1.1 404 Not Found\r\n\r\n"
-		} else if err != nil {
-			return "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+			fileContent, err := readFileContent(filename)
+			if errors.Is(err, os.ErrNotExist) {
+				return "HTTP/1.1 404 Not Found\r\n\r\n"
+			} else if err != nil {
+				return "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+			}
+			return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
+
+		case "POST":
+			filename := strings.TrimPrefix(path, "/files/")
+
+			if err := writeFileContent(filename, request.Body); err != nil {
+				return "HTTP/1.1 500 Internal Server Error\r\n\r\n"
+			}
+
+			return "HTTP/1.1 201 Created\r\n\r\n"
+
+		default:
+			return "HTTP/1.1 405 Method Not Allowed\r\n\r\n"
 		}
-		return fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %d\r\n\r\n%s", len(fileContent), fileContent)
 
 	default:
 		return "HTTP/1.1 404 Not Found\r\n\r\n"
@@ -152,4 +195,16 @@ func readFileContent(filename string) ([]byte, error) {
 	}
 
 	return fileContent, nil
+}
+
+func writeFileContent(filename string, content string) error {
+	dir := os.Args[2]
+	filePath := dir + filename
+
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		log.Printf("failed to write file %s: %v", filePath, err)
+		return err
+	}
+
+	return nil
 }
